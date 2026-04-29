@@ -1,0 +1,9 @@
+/health-auto-export
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+HealthAutoExport_*.zip
+/tmp/

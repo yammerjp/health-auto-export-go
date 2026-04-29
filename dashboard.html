@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Health Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; padding: 20px; }
+  h1 { font-size: 1.5rem; margin-bottom: 16px; }
+  .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+  .controls .btn-group, .controls .date-group { display: flex; gap: 8px; align-items: center; }
+  .controls label { font-size: 0.85rem; color: #666; }
+  .controls input[type="date"] { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem; }
+  .controls button { padding: 4px 12px; border: 1px solid #007aff; background: #007aff; color: #fff; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  .controls button:hover { background: #005ec4; }
+  .controls button.outline { background: #fff; color: #007aff; }
+  .controls button.outline:hover { background: #f0f0f0; }
+  .controls button.outline.active { background: #007aff; color: #fff; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .card .label { font-size: 0.75rem; text-transform: uppercase; color: #888; margin-bottom: 4px; }
+  .card .value { font-size: 1.5rem; font-weight: 600; }
+  .card .detail { font-size: 0.8rem; color: #666; margin-top: 4px; }
+  .chart-container { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
+  .chart-container h2 { font-size: 1rem; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eee; }
+  th { font-weight: 600; color: #666; font-size: 0.75rem; text-transform: uppercase; }
+  .loading { color: #999; font-style: italic; }
+  #tokenPrompt { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  #tokenPrompt .dialog { background: #fff; border-radius: 12px; padding: 24px; max-width: 400px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+  #tokenPrompt h2 { font-size: 1.1rem; margin-bottom: 12px; }
+  #tokenPrompt p { font-size: 0.85rem; color: #666; margin-bottom: 12px; }
+  #tokenPrompt input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem; margin-bottom: 12px; }
+  #tokenPrompt button { padding: 6px 16px; border: none; background: #007aff; color: #fff; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  #tokenPrompt button:hover { background: #005ec4; }
+  #tokenPrompt .error { color: #ff3b30; font-size: 0.8rem; margin-bottom: 8px; display: none; }
+</style>
+</head>
+<body>
+
+<div id="tokenPrompt" style="display:none">
+  <div class="dialog">
+    <h2>API Token Required</h2>
+    <p>Enter your read API token to access the dashboard.</p>
+    <div class="error" id="tokenError">Invalid token. Please try again.</div>
+    <input type="password" id="tokenInput" placeholder="sk-...">
+    <button onclick="submitToken()">Connect</button>
+  </div>
+</div>
+
+<h1>Health Dashboard</h1>
+
+<div class="controls">
+  <div class="btn-group">
+    <button class="outline" onclick="setRange(7)">7 days</button>
+    <button class="outline active" onclick="setRange(30)">30 days</button>
+    <button class="outline" onclick="setRange(90)">90 days</button>
+  </div>
+  <div class="date-group">
+    <label>From <input type="date" id="dateFrom"></label>
+    <label>To <input type="date" id="dateTo"></label>
+    <button onclick="loadAll()">Update</button>
+  </div>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="label">Steps Yesterday</div>
+    <div class="value" id="stepsYesterday">--</div>
+  </div>
+  <div class="card">
+    <div class="label">Heart Rate Today</div>
+    <div class="value" id="hrToday">--</div>
+    <div class="detail" id="hrDetail"></div>
+  </div>
+  <div class="card">
+    <div class="label">Sleep Last Night</div>
+    <div class="value" id="sleepToday">--</div>
+    <div class="detail" id="sleepDetail"></div>
+  </div>
+</div>
+
+<div class="chart-container">
+  <h2>Steps per Day</h2>
+  <canvas id="stepsChart"></canvas>
+</div>
+
+<div class="chart-container">
+  <h2>Heart Rate per Day</h2>
+  <canvas id="hrChart"></canvas>
+</div>
+
+<div class="chart-container">
+  <h2>Sleep Breakdown per Night</h2>
+  <canvas id="sleepChart"></canvas>
+</div>
+
+<div class="chart-container">
+  <h2>Workouts</h2>
+  <table>
+    <thead><tr><th>Date</th><th>Type</th><th>Duration</th><th>Calories</th></tr></thead>
+    <tbody id="workoutTable"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+const STORAGE_KEY = 'health-dashboard-token';
+let TOKEN = localStorage.getItem(STORAGE_KEY) || '';
+let headers = TOKEN ? {'api-key': TOKEN} : {};
+
+let stepsChart, hrChart, sleepChart;
+
+function isoDate(d) { return d.toISOString().slice(0, 10); }
+
+function initDates() { setRange(30, false); }
+
+function setRange(days, autoLoad = true) {
+  const now = new Date();
+  const from = new Date(now);
+  from.setDate(from.getDate() - days);
+  document.getElementById('dateFrom').value = isoDate(from);
+  document.getElementById('dateTo').value = isoDate(now);
+  document.querySelectorAll('.controls button.outline').forEach(b => {
+    b.classList.toggle('active', b.textContent.trim() === days + ' days');
+  });
+  if (autoLoad && TOKEN) loadAll();
+}
+
+function showTokenPrompt() {
+  document.getElementById('tokenPrompt').style.display = 'flex';
+  document.getElementById('tokenInput').focus();
+}
+
+async function submitToken() {
+  const input = document.getElementById('tokenInput').value.trim();
+  if (!input) return;
+  // Test the token against the API
+  const res = await fetch('/api/metrics/step_count?from=2000-01-01&to=2000-01-02', {headers: {'api-key': input}});
+  if (res.status === 401) {
+    document.getElementById('tokenError').style.display = 'block';
+    return;
+  }
+  TOKEN = input;
+  headers = {'api-key': TOKEN};
+  localStorage.setItem(STORAGE_KEY, TOKEN);
+  document.getElementById('tokenPrompt').style.display = 'none';
+  loadAll();
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.getElementById('tokenPrompt').style.display === 'flex') submitToken();
+});
+
+async function apiFetch(path) {
+  const res = await fetch(path, {headers});
+  if (res.status === 401) {
+    localStorage.removeItem(STORAGE_KEY);
+    showTokenPrompt();
+    return [];
+  }
+  if (!res.ok) return [];
+  return res.json();
+}
+
+function dateRange() {
+  const from = document.getElementById('dateFrom').value;
+  const to = document.getElementById('dateTo').value;
+  return `from=${from}&to=${to}`;
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  return isoDate(new Date(iso));
+}
+
+function fmtHours(hrs) {
+  const h = Math.floor(hrs);
+  const m = Math.round((hrs - h) * 60);
+  return h + 'h ' + m + 'm';
+}
+
+// Aggregate step data by day (sum multiple sources)
+function aggregateByDay(data) {
+  const byDay = {};
+  data.forEach(d => {
+    const day = fmtDate(d.date);
+    byDay[day] = (byDay[day] || 0) + (d.qty || 0);
+  });
+  const days = Object.keys(byDay).sort();
+  return { labels: days, values: days.map(d => byDay[d]) };
+}
+
+// Aggregate heart rate by day (average of all readings)
+function aggregateHRByDay(data) {
+  const byDay = {};
+  data.forEach(d => {
+    const day = fmtDate(d.date);
+    if (!byDay[day]) byDay[day] = { mins: [], avgs: [], maxs: [] };
+    byDay[day].mins.push(d.Min);
+    byDay[day].avgs.push(d.Avg);
+    byDay[day].maxs.push(d.Max);
+  });
+  const days = Object.keys(byDay).sort();
+  const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+  return {
+    labels: days,
+    min: days.map(d => Math.min(...byDay[d].mins)),
+    avg: days.map(d => Math.round(avg(byDay[d].avgs))),
+    max: days.map(d => Math.max(...byDay[d].maxs)),
+  };
+}
+
+// Aggregate sleep by day
+function aggregateSleepByDay(data) {
+  const byDay = {};
+  data.forEach(d => {
+    const day = fmtDate(d.date);
+    if (!byDay[day]) byDay[day] = { core: 0, rem: 0, deep: 0, awake: 0 };
+    byDay[day].core += d.core || 0;
+    byDay[day].rem += d.rem || 0;
+    byDay[day].deep += d.deep || 0;
+    byDay[day].awake += d.awake || 0;
+  });
+  const days = Object.keys(byDay).sort();
+  return {
+    labels: days,
+    core: days.map(d => byDay[d].core),
+    rem: days.map(d => byDay[d].rem),
+    deep: days.map(d => byDay[d].deep),
+    awake: days.map(d => byDay[d].awake),
+  };
+}
+
+// Filter records whose UTC date falls on a given local date
+function filterByLocalDate(data, localDate) {
+  return data.filter(d => {
+    const local = isoDate(new Date(d.date));
+    return local === localDate;
+  });
+}
+
+async function loadSummary() {
+  const today = isoDate(new Date());
+  const yesterday = isoDate(new Date(Date.now() - 86400000));
+  const twoDaysAgo = isoDate(new Date(Date.now() - 2 * 86400000));
+
+  // Steps yesterday (fetch wide range to cover UTC offset, then filter by local date)
+  const steps = await apiFetch(`/api/metrics/step_count?from=${twoDaysAgo}&to=${today}`);
+  const yesterdaySteps = filterByLocalDate(steps, yesterday);
+  const totalSteps = yesterdaySteps.reduce((s, d) => s + (d.qty || 0), 0);
+  document.getElementById('stepsYesterday').textContent = totalSteps > 0 ? totalSteps.toLocaleString() : '--';
+
+  // Heart rate today (fetch yesterday+today range, filter to today)
+  const hr = await apiFetch(`/api/metrics/heart_rate?from=${yesterday}&to=${today}`);
+  const todayHR = filterByLocalDate(hr, today);
+  if (todayHR.length > 0) {
+    const last = todayHR[todayHR.length - 1];
+    document.getElementById('hrToday').textContent = Math.round(last.Avg) + ' bpm';
+    document.getElementById('hrDetail').textContent = 'Min ' + Math.round(last.Min) + ' / Max ' + Math.round(last.Max);
+  }
+
+  // Sleep last night (fetch wide range, take the most recent entry for yesterday)
+  const sleep = await apiFetch(`/api/metrics/sleep_analysis?from=${twoDaysAgo}&to=${today}`);
+  const lastNight = filterByLocalDate(sleep, yesterday);
+  if (lastNight.length > 0) {
+    const last = lastNight[lastNight.length - 1];
+    document.getElementById('sleepToday').textContent = fmtHours(last.asleep || last.totalSleep || 0);
+    document.getElementById('sleepDetail').textContent = 'Deep ' + fmtHours(last.deep || 0) + ' / REM ' + fmtHours(last.rem || 0);
+  }
+}
+
+async function loadSteps() {
+  const data = await apiFetch(`/api/metrics/step_count?${dateRange()}`);
+  const agg = aggregateByDay(data);
+  if (stepsChart) stepsChart.destroy();
+  stepsChart = new Chart(document.getElementById('stepsChart'), {
+    type: 'bar',
+    data: {
+      labels: agg.labels,
+      datasets: [{ label: 'Steps', data: agg.values, backgroundColor: 'rgba(0,122,255,0.6)' }]
+    },
+    options: { responsive: true, scales: { x: { ticks: { maxTicksLimit: 15 } } }, plugins: { legend: { display: false } } }
+  });
+}
+
+async function loadHeartRate() {
+  const data = await apiFetch(`/api/metrics/heart_rate?${dateRange()}`);
+  const agg = aggregateHRByDay(data);
+  if (hrChart) hrChart.destroy();
+  hrChart = new Chart(document.getElementById('hrChart'), {
+    type: 'line',
+    data: {
+      labels: agg.labels,
+      datasets: [
+        { label: 'Min', data: agg.min, borderColor: '#34c759', backgroundColor: 'rgba(52,199,89,0.1)', fill: false, tension: 0.3, pointRadius: 1 },
+        { label: 'Avg', data: agg.avg, borderColor: '#007aff', backgroundColor: 'rgba(0,122,255,0.1)', fill: false, tension: 0.3, pointRadius: 1 },
+        { label: 'Max', data: agg.max, borderColor: '#ff3b30', backgroundColor: 'rgba(255,59,48,0.1)', fill: false, tension: 0.3, pointRadius: 1 },
+      ]
+    },
+    options: { responsive: true, scales: { x: { ticks: { maxTicksLimit: 15 } } } }
+  });
+}
+
+async function loadSleep() {
+  const data = await apiFetch(`/api/metrics/sleep_analysis?${dateRange()}`);
+  const agg = aggregateSleepByDay(data);
+  if (sleepChart) sleepChart.destroy();
+  sleepChart = new Chart(document.getElementById('sleepChart'), {
+    type: 'bar',
+    data: {
+      labels: agg.labels,
+      datasets: [
+        { label: 'Deep', data: agg.deep, backgroundColor: '#5856d6' },
+        { label: 'Core', data: agg.core, backgroundColor: '#007aff' },
+        { label: 'REM', data: agg.rem, backgroundColor: '#34c759' },
+        { label: 'Awake', data: agg.awake, backgroundColor: '#ff9500' },
+      ]
+    },
+    options: {
+      responsive: true,
+      scales: { x: { stacked: true, ticks: { maxTicksLimit: 15 } }, y: { stacked: true, title: { display: true, text: 'Hours' } } }
+    }
+  });
+}
+
+async function loadWorkouts() {
+  const from = document.getElementById('dateFrom').value;
+  const to = document.getElementById('dateTo').value;
+  const data = await apiFetch(`/api/workouts?startDate=${from}&endDate=${to}`);
+  const tbody = document.getElementById('workoutTable');
+  if (!data || data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="loading">No workouts in this period</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.map(w => {
+    const dur = w.duration_minutes ? Math.round(w.duration_minutes) + ' min' : '--';
+    const cal = w.calories_burned ? Math.round(w.calories_burned) + ' kcal' : '--';
+    return `<tr><td>${fmtDate(w.start_time)}</td><td>${w.workout_type || ''}</td><td>${dur}</td><td>${cal}</td></tr>`;
+  }).join('');
+}
+
+async function loadAll() {
+  await Promise.all([loadSummary(), loadSteps(), loadHeartRate(), loadSleep(), loadWorkouts()]);
+}
+
+initDates();
+if (TOKEN) { loadAll(); } else { showTokenPrompt(); }
+</script>
+</body>
+</html>
