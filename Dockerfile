@@ -7,17 +7,15 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=1 GOOS=linux go build \
-    -tags "sqlite_omit_load_extension" \
+RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-s -w" \
     -o /out/health-auto-export .
 
-FROM gcr.io/distroless/base-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /out/health-auto-export /usr/local/bin/health-auto-export
 
-ENV PORT=8080 \
-    DB_PATH=/data/health.db
+ENV PORT=8080
 
 EXPOSE 8080
 
