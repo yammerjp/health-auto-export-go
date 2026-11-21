@@ -353,11 +353,7 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	db, err := openDB(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	rt := "sk-test-read"
 	wt := "sk-test-write"
 	srv := NewServer(db, rt, wt)

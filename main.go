@@ -21,11 +21,14 @@ func main() {
 	}
 
 	port := envOr("PORT", "8080")
-	dbPath := envOr("DB_PATH", "health.db")
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("DATABASE_URL is required (e.g. postgres://user:pass@host:5432/db)")
+	}
 	readToken := os.Getenv("READ_TOKEN")
 	writeToken := os.Getenv("WRITE_TOKEN")
 
-	db, err := openDB(dbPath)
+	db, err := openDB(dsn)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}

@@ -16,10 +16,13 @@ func runImport(args []string) error {
 		return errors.New("usage: health-auto-export import <export.json|export.zip>")
 	}
 
-	dbPath := envOr("DB_PATH", "health.db")
-	db, err := openDB(dbPath)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return errors.New("DATABASE_URL is required")
+	}
+	db, err := openDB(dsn)
 	if err != nil {
-		return fmt.Errorf("open db %q: %w", dbPath, err)
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 
@@ -39,8 +42,8 @@ func runImport(args []string) error {
 	}
 
 	fmt.Printf(
-		"Imported %d metric groups and %d workouts (%d routes) into %s\n",
-		metricGroups, workouts, routes, dbPath,
+		"Imported %d metric groups and %d workouts (%d routes)\n",
+		metricGroups, workouts, routes,
 	)
 	return nil
 }

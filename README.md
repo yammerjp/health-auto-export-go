@@ -2,7 +2,13 @@
 
 A small self-hosted server that ingests data exported by the iOS app
 [Health Auto Export](https://www.healthyapps.dev/health-auto-export) and
-stores it in SQLite. Single Go binary, no external services.
+stores it in PostgreSQL. Single static Go binary.
+
+> Since v1.0.0 the storage is PostgreSQL (earlier versions used SQLite).
+> To move an existing `health.db`, copy the six tables (`metrics`,
+> `blood_pressure`, `heart_rate`, `sleep_analysis`, `workouts`,
+> `workout_routes`) into the tables this server creates on first start;
+> the column names are unchanged.
 
 The server speaks the same JSON contract as the iOS app's REST export and
 manual export, so it works as a drop-in receiver alongside dashboards
@@ -10,8 +16,8 @@ manual export, so it works as a drop-in receiver alongside dashboards
 
 ## Features
 
-- Single binary (CGO for `mattn/go-sqlite3`); no external database service required.
-- File-based SQLite database; backups are a single file copy.
+- Single static binary (pure Go, `jackc/pgx`); tables are created on first start.
+- PostgreSQL storage; each request is written in one transaction.
 - CLI subcommand to import a manual-export JSON or ZIP into the same database.
 - Bearer-style API tokens (`api-key` header) for read and write paths.
 - Built-in `/dashboard` HTML view for sanity-checking ingested data.
@@ -20,10 +26,13 @@ manual export, so it works as a drop-in receiver alongside dashboards
 ## Quick start
 
 ```sh
-docker run --rm -p 8080:8080 \
+docker network create hae
+docker run -d --name hae-pg --network hae -e POSTGRES_PASSWORD=postgres \
+  -v "$PWD/pgdata:/var/lib/postgresql" postgres:18-alpine
+docker run --rm -p 8080:8080 --network hae \
+  -e DATABASE_URL='postgres://postgres:postgres@hae-pg:5432/postgres?sslmode=disable' \
   -e READ_TOKEN=sk-$(openssl rand -hex 16) \
   -e WRITE_TOKEN=sk-$(openssl rand -hex 16) \
-  -v "$PWD/data:/data" \
   ghcr.io/yammerjp/health-auto-export-go:latest
 ```
 
@@ -35,7 +44,7 @@ Configure the iOS app to POST to `http://<host>:8080/api/data` with the
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `8080` | Listen port. |
-| `DB_PATH` | `health.db` (image: `/data/health.db`) | SQLite file path. |
+| `DATABASE_URL` | (required) | PostgreSQL URL or DSN, e.g. `postgres://user:pass@host:5432/db?sslmode=verify-full&sslrootcert=/etc/pg-ca/ca.crt`. The connection is retried for 60 s at startup. |
 | `READ_TOKEN` | (empty) | Required for read endpoints. Must start with `sk-`. |
 | `WRITE_TOKEN` | (empty) | Required for `POST /api/data`. Must start with `sk-`. |
 
@@ -65,16 +74,19 @@ JSON files are accepted as well. Existing rows are upserted (per-metric on
 
 ## Build from source
 
-Requires Go 1.25+ and a C toolchain (for `mattn/go-sqlite3`).
+Requires Go 1.25+. Tests need a PostgreSQL to create throwaway schemas in
+(they are skipped when `TEST_DATABASE_URL` is unset).
 
 ```sh
-CGO_ENABLED=1 go build -o health-auto-export .
-go test ./...
+go build -o health-auto-export .
+docker run -d --rm --name hae-test-pg -e POSTGRES_PASSWORD=postgres -p 127.0.0.1:55432:5432 postgres:18-alpine
+TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:55432/postgres?sslmode=disable' go test ./...
 ```
 
 ## Kubernetes
 
-A minimal Deployment with a `local-path` PVC for the SQLite file:
+A minimal Deployment (the database is assumed to exist elsewhere; the URL is
+read from a Secret):
 
 ```yaml
 apiVersion: apps/v1
@@ -95,23 +107,13 @@ spec:
           image: ghcr.io/yammerjp/health-auto-export-go:latest
           env:
             - { name: PORT, value: "8080" }
-            - { name: DB_PATH, value: /data/health.db }
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: health-auto-export-db, key: uri } }
             - name: READ_TOKEN
               valueFrom: { secretKeyRef: { name: health-auto-export, key: READ_TOKEN } }
             - name: WRITE_TOKEN
               valueFrom: { secretKeyRef: { name: health-auto-export, key: WRITE_TOKEN } }
           ports: [{ containerPort: 8080 }]
-          volumeMounts: [{ name: data, mountPath: /data }]
-      volumes:
-        - name: data
-          persistentVolumeClaim: { claimName: health-auto-export-data }
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata: { name: health-auto-export-data }
-spec:
-  accessModes: [ReadWriteOnce]
-  resources: { requests: { storage: 1Gi } }
 ```
 
 Expose via your Ingress controller of choice; pair with HTTP basic auth or

@@ -21,9 +21,29 @@ func toISO8601(s string) string {
 	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
+// execer is satisfied by both *sql.DB and *sql.Tx.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // saveMetrics dispatches metric data to the correct table based on metric name.
 // Returns the number of metric groups saved (not individual data points).
+// All rows are written in one transaction: a failed request leaves nothing behind,
+// and the app's next export (which upserts) can simply be retried.
 func saveMetrics(db *sql.DB, metrics []RawMetric) (int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	n, err := saveMetricsTx(tx, metrics)
+	if err != nil {
+		return n, err
+	}
+	return n, tx.Commit()
+}
+
+func saveMetricsTx(db execer, metrics []RawMetric) (int, error) {
 	groupCount := 0
 	for _, m := range metrics {
 		for _, raw := range m.Data {
@@ -47,53 +67,53 @@ func saveMetrics(db *sql.DB, metrics []RawMetric) (int, error) {
 	return groupCount, nil
 }
 
-func upsertBaseMetric(db *sql.DB, name, units string, raw json.RawMessage) error {
+func upsertBaseMetric(db execer, name, units string, raw json.RawMessage) error {
 	var d BaseMetricData
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return err
 	}
 	_, err := db.Exec(`
 		INSERT INTO metrics (name, qty, units, date, source, metadata)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (name, date, source) DO UPDATE SET qty=excluded.qty, units=excluded.units, metadata=excluded.metadata`,
 		name, d.Qty, units, toISO8601(d.Date), d.Source, rawStr(d.Metadata))
 	return err
 }
 
-func upsertHeartRate(db *sql.DB, units string, raw json.RawMessage) error {
+func upsertHeartRate(db execer, units string, raw json.RawMessage) error {
 	var d HeartRateData
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return err
 	}
 	_, err := db.Exec(`
 		INSERT INTO heart_rate (min, avg, max, units, date, source, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (date, source) DO UPDATE SET min=excluded.min, avg=excluded.avg, max=excluded.max, units=excluded.units, metadata=excluded.metadata`,
 		d.Min, d.Avg, d.Max, units, toISO8601(d.Date), d.Source, rawStr(d.Metadata))
 	return err
 }
 
-func upsertBloodPressure(db *sql.DB, units string, raw json.RawMessage) error {
+func upsertBloodPressure(db execer, units string, raw json.RawMessage) error {
 	var d BloodPressureData
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return err
 	}
 	_, err := db.Exec(`
 		INSERT INTO blood_pressure (systolic, diastolic, units, date, source, metadata)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (date, source) DO UPDATE SET systolic=excluded.systolic, diastolic=excluded.diastolic, units=excluded.units, metadata=excluded.metadata`,
 		d.Systolic, d.Diastolic, units, toISO8601(d.Date), d.Source, rawStr(d.Metadata))
 	return err
 }
 
-func upsertSleep(db *sql.DB, units string, raw json.RawMessage) error {
+func upsertSleep(db execer, units string, raw json.RawMessage) error {
 	var d SleepData
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return err
 	}
 	_, err := db.Exec(`
 		INSERT INTO sleep_analysis (date, in_bed_start, in_bed_end, sleep_start, sleep_end, core, rem, deep, awake, in_bed, asleep, total_sleep, units, source, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (date, source) DO UPDATE SET
 			in_bed_start=excluded.in_bed_start, in_bed_end=excluded.in_bed_end,
 			sleep_start=excluded.sleep_start, sleep_end=excluded.sleep_end,
@@ -108,6 +128,19 @@ func upsertSleep(db *sql.DB, units string, raw json.RawMessage) error {
 
 // saveWorkouts saves workout and route data. Dates are converted to ISO 8601.
 func saveWorkouts(db *sql.DB, workouts []RawWorkout) (int, int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	w, r, err := saveWorkoutsTx(tx, workouts)
+	if err != nil {
+		return w, r, err
+	}
+	return w, r, tx.Commit()
+}
+
+func saveWorkoutsTx(db execer, workouts []RawWorkout) (int, int, error) {
 	wCount, rCount := 0, 0
 	for _, w := range workouts {
 		hrdJSON, _ := json.Marshal(w.HeartRateData)
@@ -134,14 +167,14 @@ func saveWorkouts(db *sql.DB, workouts []RawWorkout) (int, int, error) {
 		}
 
 		_, err := db.Exec(`
-			INSERT INTO workouts (workout_id, name, start, end, duration,
+			INSERT INTO workouts (workout_id, name, start, "end", duration,
 				active_energy_burned_qty, active_energy_burned_units,
 				distance_qty, distance_units,
 				heart_rate_data, heart_rate_recovery, step_count,
 				temperature_qty, humidity_qty, intensity_qty)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (workout_id) DO UPDATE SET
-				name=excluded.name, start=excluded.start, end=excluded.end, duration=excluded.duration,
+				name=excluded.name, start=excluded.start, "end"=excluded."end", duration=excluded.duration,
 				active_energy_burned_qty=excluded.active_energy_burned_qty,
 				active_energy_burned_units=excluded.active_energy_burned_units,
 				distance_qty=excluded.distance_qty, distance_units=excluded.distance_units,
@@ -149,7 +182,7 @@ func saveWorkouts(db *sql.DB, workouts []RawWorkout) (int, int, error) {
 				step_count=excluded.step_count,
 				temperature_qty=excluded.temperature_qty, humidity_qty=excluded.humidity_qty,
 				intensity_qty=excluded.intensity_qty,
-				updated_at=datetime('now')`,
+				updated_at=to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 			w.ID, w.Name, toISO8601(w.Start), toISO8601(w.End), w.Duration,
 			aebQty, aebUnits, distQty, distUnits,
 			string(hrdJSON), string(hrrJSON), string(scJSON),
@@ -163,8 +196,8 @@ func saveWorkouts(db *sql.DB, workouts []RawWorkout) (int, int, error) {
 			locJSON, _ := json.Marshal(w.Route)
 			_, err := db.Exec(`
 				INSERT INTO workout_routes (workout_id, locations)
-				VALUES (?, ?)
-				ON CONFLICT (workout_id) DO UPDATE SET locations=excluded.locations, updated_at=datetime('now')`,
+				VALUES ($1, $2)
+				ON CONFLICT (workout_id) DO UPDATE SET locations=excluded.locations, updated_at=to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				w.ID, string(locJSON))
 			if err != nil {
 				return wCount, rCount, fmt.Errorf("saving route for %s: %w", w.ID, err)
@@ -190,14 +223,14 @@ func queryMetrics(db *sql.DB, metricType, from, to string) ([]map[string]interfa
 }
 
 func queryBaseMetric(db *sql.DB, metricType, from, to string) ([]map[string]interface{}, error) {
-	query := "SELECT qty, units, date, source, metadata FROM metrics WHERE name = ?"
+	query := "SELECT qty, units, date, source, metadata FROM metrics WHERE name = $1"
 	args := []interface{}{metricType}
 
-	if fromTo := dateFilter(from, to); fromTo != "" {
+	if fromTo := dateFilter(from, to, 2); fromTo != "" {
 		query += " AND " + fromTo
 		args = append(args, dateFilterArgs(from, to)...)
 	}
-	query += " ORDER BY date ASC"
+	query += " ORDER BY date ASC, source ASC"
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -231,11 +264,11 @@ func queryHeartRate(db *sql.DB, from, to string) ([]map[string]interface{}, erro
 	query := "SELECT min, avg, max, units, date, source, metadata FROM heart_rate"
 	var args []interface{}
 
-	if fromTo := dateFilter(from, to); fromTo != "" {
+	if fromTo := dateFilter(from, to, 1); fromTo != "" {
 		query += " WHERE " + fromTo
 		args = dateFilterArgs(from, to)
 	}
-	query += " ORDER BY date ASC"
+	query += " ORDER BY date ASC, source ASC"
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -271,11 +304,11 @@ func queryBloodPressure(db *sql.DB, from, to string) ([]map[string]interface{}, 
 	query := "SELECT systolic, diastolic, units, date, source, metadata FROM blood_pressure"
 	var args []interface{}
 
-	if fromTo := dateFilter(from, to); fromTo != "" {
+	if fromTo := dateFilter(from, to, 1); fromTo != "" {
 		query += " WHERE " + fromTo
 		args = dateFilterArgs(from, to)
 	}
-	query += " ORDER BY date ASC"
+	query += " ORDER BY date ASC, source ASC"
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -310,11 +343,11 @@ func querySleep(db *sql.DB, from, to string) ([]map[string]interface{}, error) {
 	query := "SELECT date, in_bed_start, in_bed_end, sleep_start, sleep_end, core, rem, deep, awake, in_bed, asleep, total_sleep, units, source, metadata FROM sleep_analysis"
 	var args []interface{}
 
-	if fromTo := dateFilter(from, to); fromTo != "" {
+	if fromTo := dateFilter(from, to, 1); fromTo != "" {
 		query += " WHERE " + fromTo
 		args = dateFilterArgs(from, to)
 	}
-	query += " ORDER BY date ASC"
+	query += " ORDER BY date ASC, source ASC"
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -356,14 +389,14 @@ func querySleep(db *sql.DB, from, to string) ([]map[string]interface{}, error) {
 
 // queryWorkouts returns workout summaries with ISO dates.
 func queryWorkouts(db *sql.DB, startDate, endDate string) ([]WorkoutSummary, error) {
-	query := "SELECT workout_id, name, start, end, duration, active_energy_burned_qty FROM workouts"
+	query := `SELECT workout_id, name, start, "end", duration, active_energy_burned_qty FROM workouts`
 	var args []interface{}
 
 	if startDate != "" && endDate != "" {
 		fromTime := parseDate(startDate)
 		toTime := parseDate(endDate)
 		if fromTime != nil && toTime != nil {
-			query += " WHERE start >= ? AND start <= ?"
+			query += " WHERE start >= $1 AND start <= $2"
 			args = append(args, fromTime.UTC().Format("2006-01-02T15:04:05.000Z"), toTime.UTC().Format("2006-01-02T15:04:05.000Z"))
 		}
 	}
@@ -401,7 +434,7 @@ func queryWorkouts(db *sql.DB, startDate, endDate string) ([]WorkoutSummary, err
 // queryWorkoutDetail returns transformed heart rate data, recovery, and route.
 func queryWorkoutDetail(db *sql.DB, workoutID string) (*WorkoutDetail, error) {
 	var hrd, hrr sql.NullString
-	err := db.QueryRow("SELECT heart_rate_data, heart_rate_recovery FROM workouts WHERE workout_id = ?", workoutID).Scan(&hrd, &hrr)
+	err := db.QueryRow("SELECT heart_rate_data, heart_rate_recovery FROM workouts WHERE workout_id = $1", workoutID).Scan(&hrd, &hrr)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -414,7 +447,7 @@ func queryWorkoutDetail(db *sql.DB, workoutID string) (*WorkoutDetail, error) {
 	detail.HeartRateRecovery = transformHeartRateData(hrr, "Heart Rate Recovery")
 
 	var loc sql.NullString
-	err = db.QueryRow("SELECT locations FROM workout_routes WHERE workout_id = ?", workoutID).Scan(&loc)
+	err = db.QueryRow("SELECT locations FROM workout_routes WHERE workout_id = $1", workoutID).Scan(&loc)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
@@ -513,7 +546,8 @@ func rawStr(r *json.RawMessage) interface{} {
 }
 
 // dateFilter returns a WHERE clause fragment for date filtering.
-func dateFilter(from, to string) string {
+// n is the placeholder number of the first argument ($n, $n+1).
+func dateFilter(from, to string, n int) string {
 	if from == "" || to == "" {
 		return ""
 	}
@@ -522,7 +556,7 @@ func dateFilter(from, to string) string {
 	if fromTime == nil || toTime == nil {
 		return ""
 	}
-	return "date >= ? AND date <= ?"
+	return fmt.Sprintf("date >= $%d AND date <= $%d", n, n+1)
 }
 
 func dateFilterArgs(from, to string) []interface{} {
